@@ -1,0 +1,35 @@
+{
+  "version": "1.1.0",
+  "methodology": "aliyun_onedata_methodology.md",
+  "sharedSystem": "_shared_system.md",
+  "tasks": {
+    "table_semantic": {
+      "file": "table_semantic.md",
+      "description": "来源表语义识别、表类型判断、业务过程识别"
+    },
+    "field_semantic": {
+      "file": "field_semantic.md",
+      "description": "字段语义分类、歧义检测、字典和口径识别"
+    },
+    "model_recommendation": {
+      "file": "model_recommendation.md",
+      "description": "CDM 候选模型推荐，用户最终单选目标模型"
+    },
+    "field_mapping": {
+      "file": "field_mapping.md",
+      "description": "目标字段到来源字段的映射、取值逻辑和可行性判断"
+    },
+    "question_review": {
+      "file": "question_review.md",
+      "description": "疑问补充后重新复核字段映射"
+    },
+    "sql_generation": {
+      "file": "sql_generation.md",
+      "description": "生成开发参考 SQL 草稿"
+    },
+    "prd_generation": {
+      "file": "prd_generation.md",
+      "description": "生成 PRD、Excel Sheet 数据和交付清单"
+    }
+  }
+}

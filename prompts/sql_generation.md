@@ -4,7 +4,7 @@ Use with `aliyun_onedata_methodology.md` and `_shared_system.md`.
 
 ## Goal
 
-Generate a development-reference SQL draft for the user-selected target model.
+Generate a development-reference DDL + INSERT SQL draft for the user-selected target model.
 
 The SQL is not production-ready unless reviewed by data developers.
 
@@ -24,15 +24,26 @@ The SQL is not production-ready unless reviewed by data developers.
 
 ## SQL Requirements
 
-1. Use readable CTE structure.
-2. Include source cleanup CTE if needed.
-3. Include dictionary translation CTE if dictionary dependencies exist.
-4. Include event/process aggregation or pivot CTE if event fields are mapped to wide table fields.
-5. Include main join CTE.
-6. Include final SELECT.
-7. Add comments for uncertain logic, missing dictionaries, missing source tables, and second-phase fields.
-8. Do not invent physical table names that are not provided, except the selected target table.
-9. Use ANSI-like SQL where possible.
+1. First design the final query logic as CTE + final SELECT.
+2. Derive the target `CREATE TABLE` columns strictly from the final SELECT output columns, not from the raw target-field wish list.
+3. Then generate `INSERT INTO target_table (...) WITH ... SELECT ...` using exactly the same final output columns.
+4. The column order in `CREATE TABLE`, `insertColumns`, and final SELECT must be identical.
+5. Use readable CTE structure.
+6. Include source cleanup CTE if needed.
+7. Include dictionary translation CTE if dictionary dependencies exist.
+8. Include event/process aggregation or pivot CTE if event fields are mapped to wide table fields.
+9. Include main join CTE.
+10. Add comments for uncertain logic, missing dictionaries, missing source tables, and second-phase fields.
+11. Do not invent physical table names that are not provided, except the selected target table.
+12. Use ANSI-like SQL where possible.
+
+## DDL Requirements
+
+1. `createTableSql` must create the selected target table.
+2. Every field in `createTableSql` must come from the final SELECT output.
+3. Choose data types from source fields and transformation logic. Do not default everything to varchar.
+4. Include column comments in Chinese.
+5. Include table comment, layer, grain, and uncertainty TODO comments where needed.
 
 ## Alibaba Cloud / OneData SQL Requirements
 
@@ -50,7 +61,19 @@ The SQL is not production-ready unless reviewed by data developers.
 ```json
 {
   "targetTable": "dws_xxx_wide",
-  "sql": "WITH ... SELECT ...",
+  "outputColumns": [
+    {
+      "name": "business_order_id",
+      "type": "bigint",
+      "comment": "业务单据ID",
+      "sourceExpression": "b.order_id",
+      "logic": "来自主业务单据ID"
+    }
+  ],
+  "createTableSql": "CREATE TABLE dws_xxx_wide (...) COMMENT 'xxx';",
+  "insertSql": "INSERT INTO dws_xxx_wide (...) WITH ... SELECT ...",
+  "finalSelectSql": "WITH ... SELECT ...",
+  "sql": "INSERT INTO dws_xxx_wide (...) WITH ... SELECT ...",
   "assumptions": [
     "假设主表一条业务单据一行"
   ],

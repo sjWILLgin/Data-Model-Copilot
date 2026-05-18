@@ -29,6 +29,11 @@ export async function listPromptTasks() {
 }
 
 export async function buildPromptMessages(promptName: PromptName, context: unknown) {
+  const bundle = await buildPromptBundle(promptName, context);
+  return bundle.messages;
+}
+
+export async function buildPromptBundle(promptName: PromptName, context: unknown) {
   const registry = await loadPromptRegistry();
   const task = registry.tasks[promptName];
   if (!task) {
@@ -41,7 +46,7 @@ export async function buildPromptMessages(promptName: PromptName, context: unkno
     readFile(path.join(promptsDir, task.file), "utf-8")
   ]);
 
-  return [
+  const messages = [
     {
       role: "system" as const,
       content: `${methodology}\n\n${sharedSystem}\n\n${taskPrompt}`
@@ -51,4 +56,15 @@ export async function buildPromptMessages(promptName: PromptName, context: unkno
       content: JSON.stringify(context, null, 2)
     }
   ];
+
+  return {
+    messages,
+    metadata: {
+      registryVersion: registry.version,
+      methodologyFile: registry.methodology,
+      sharedSystemFile: registry.sharedSystem,
+      taskFile: task.file,
+      taskDescription: task.description
+    }
+  };
 }

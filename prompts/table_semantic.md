@@ -6,6 +6,17 @@ Use with `aliyun_onedata_methodology.md` and `_shared_system.md`.
 
 Analyze uploaded source tables and identify their business meaning, table type, business object/activity/event coverage, grain, risks, and questions.
 
+## Scale Control
+
+For table-level analysis, do not perform full field mapping. The input may include only representative key fields. Use those fields to infer table type, grain, business process, and model risks.
+
+Keep output concise:
+
+1. Analyze each table once.
+2. Do not list every source field in narrative text.
+3. Return at most 2 questions per table and at most 5 global risks.
+4. Always return complete JSON.
+
 ## Alibaba Cloud / OneData Analysis Requirements
 
 For each table, identify:

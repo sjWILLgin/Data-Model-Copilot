@@ -6,6 +6,17 @@ Use with `aliyun_onedata_methodology.md` and `_shared_system.md`.
 
 Map each target field to the most appropriate source table and source field, generate transformation logic, feasibility, confidence, and questions.
 
+## Batch Mode
+
+The UI may call this prompt in batches. If `mappingBatch` is present:
+
+1. Only map the target fields included in the current `targetFields` array.
+2. Do not output mappings for fields from other batches.
+3. Keep every mapping concise but SQL-deliverable.
+4. If a source field is not present in the provided compact field set, mark `feasibility` as `需补充底表` or `需业务确认` instead of inventing a source.
+5. Keep questions limited to blockers for the current batch.
+6. Always return complete JSON. Never stop mid-array.
+
 ## Input JSON
 
 ```json
@@ -33,6 +44,8 @@ Map each target field to the most appropriate source table and source field, gen
 5. If target field asks for current attribute and source field is historical/event-time attribute, create a question.
 6. If target field asks for historical attribute and only current master data exists, create a question.
 7. If no reliable source exists, set sourceTable/sourceField to null and feasibility to 需补充底表.
+8. Treat mappings as inputs to final SQL generation. Every mapping must be expressible as a final SELECT expression, or it must be marked as blocking / second phase.
+9. Do not claim a field is deliverable if it cannot be represented in `INSERT INTO ... SELECT ...`.
 
 ## Alibaba Cloud / OneData Mapping Procedure
 
@@ -49,6 +62,7 @@ For every target field:
 9. If field is ratio/price/rate, mark as non-additive and require recalculation logic.
 10. If field is code/status/type, require dictionary source or enum confirmation.
 11. If source relation is one-to-many, do not directly join into a one-row target without aggregation/pivot/bridge logic.
+12. For each deliverable field, provide enough logic for SQL generation: expression, join condition, aggregation or pivot condition, dictionary dependency, and output data type suggestion.
 
 ## Required Output JSON
 
@@ -61,6 +75,9 @@ For every target field:
       "fieldType": "枚举",
       "sourceTable": "ods_business_order",
       "sourceField": "status",
+      "outputColumnName": "business_status",
+      "outputDataType": "varchar(64)",
+      "selectExpression": "dict_status.status_name",
       "logic": "取 ods_business_order.status，并关联状态字典翻译中文含义",
       "grainCheck": "与目标单据粒度一致",
       "currentHistoricalPolicy": "不涉及",
@@ -97,6 +114,12 @@ For every target field:
       "suggestion": "补充组织维表或主数据表"
     }
   ],
+  "reasoningSummary": {
+    "keyEvidence": ["本批次字段映射使用的关键来源字段"],
+    "grainChecks": ["本批次最重要的粒度判断"],
+    "dictionaryOrMasterDataNeeds": ["字典或主数据依赖"],
+    "blockers": ["会阻塞SQL生成的问题"]
+  },
   "summary": "字段映射摘要"
 }
 ```

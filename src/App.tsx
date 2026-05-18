@@ -3,7 +3,7 @@
  * Proprietary and confidential.
  */
 
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
 type Field = {
@@ -108,6 +108,33 @@ type AiApiResponse<T = unknown> = {
   rawText?: string;
 };
 
+type AiJobStartResponse = {
+  ok: boolean;
+  jobId: string;
+  status: "queued" | "running";
+  promptName: string;
+};
+
+type AiJobStatusResponse<T = unknown> = {
+  ok: boolean;
+  jobId: string;
+  promptName: string;
+  status: "queued" | "running" | "done" | "error" | "canceled";
+  result?: AiApiResponse<T>;
+  error?: string;
+};
+
+type WorkflowStatusResponse<T = unknown> = {
+  ok: boolean;
+  workflowId: string;
+  type: string;
+  status: "queued" | "running" | "done" | "error" | "canceled";
+  currentStep: string;
+  progress: { current: number; total: number };
+  result?: AiApiResponse<T>;
+  error?: string;
+};
+
 type AiStatus = {
   mode: "idle" | "running" | "done" | "error";
   message: string;
@@ -115,6 +142,8 @@ type AiStatus = {
 
 type AiCallLog = {
   id: string;
+  jobId?: string;
+  workflowId?: string;
   step: string;
   promptName: string;
   provider: string;
@@ -577,17 +606,55 @@ function normalizeSelectedModel(plans: ModelPlan[]) {
   return plans.map((plan, index) => ({ ...plan, selected: index === targetIndex }));
 }
 
+function chunkArray<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function mergeMappingsByTarget(current: Mapping[], next: Mapping[]) {
+  const byKey = new Map<string, Mapping>();
+  current.forEach((mapping) => byKey.set(mapping.en || mapping.cn, mapping));
+  next.forEach((mapping) => byKey.set(mapping.en || mapping.cn, mapping));
+  return Array.from(byKey.values());
+}
+
+function orderMappingsByTargets(mappings: Mapping[], targets: TargetField[]) {
+  const byKey = new Map<string, Mapping>();
+  mappings.forEach((mapping) => {
+    byKey.set(mapping.en, mapping);
+    byKey.set(mapping.cn, mapping);
+  });
+  return targets.map((target) => byKey.get(target.en) || byKey.get(target.cn)).filter((mapping): mapping is Mapping => Boolean(mapping));
+}
+
 function loadAiConfig(): AiConfig {
   try {
-    const forceQwenMigrationKey = "modelcreater.aiConfigReasoningQwen.v4";
+    const forceQwenMigrationKey = "modelcreater.aiConfigReasoningQwen.v6";
     const raw = localStorage.getItem("modelcreater.aiConfig");
-    if (!raw || localStorage.getItem(forceQwenMigrationKey) !== "true") {
+    if (!raw) {
       localStorage.setItem(forceQwenMigrationKey, "true");
       localStorage.setItem("modelcreater.aiConfig", JSON.stringify(defaultAiConfig));
       return defaultAiConfig;
     }
     const parsed = JSON.parse(raw) as AiConfig;
-    return { ...defaultAiConfig, ...parsed, taskModels: { ...qwenTaskModels, ...parsed.taskModels } };
+    const migrated = {
+      ...defaultAiConfig,
+      ...parsed,
+      providers: parsed.providers?.length ? parsed.providers : defaultAiConfig.providers,
+      taskModels: {
+        ...qwenTaskModels,
+        ...parsed.taskModels,
+        mapping: localStorage.getItem(forceQwenMigrationKey) === "true" ? parsed.taskModels?.mapping || qwenTaskModels.mapping : qwenTaskModels.mapping
+      }
+    };
+    if (localStorage.getItem(forceQwenMigrationKey) !== "true") {
+      localStorage.setItem(forceQwenMigrationKey, "true");
+      localStorage.setItem("modelcreater.aiConfig", JSON.stringify(migrated));
+    }
+    return migrated;
   } catch {
     return defaultAiConfig;
   }
@@ -605,6 +672,14 @@ function promptToTaskKey(promptName: string): AiTaskKey {
   if (promptName === "question_review") return "review";
   if (promptName === "sql_generation") return "sql";
   if (promptName === "prd_generation") return "document";
+  return "semantic";
+}
+
+function stageToTaskKey(stage: number): AiTaskKey {
+  if (stage === 3) return "reasoning";
+  if (stage === 4) return "mapping";
+  if (stage === 5) return "review";
+  if (stage === 6) return "document";
   return "semantic";
 }
 
@@ -678,17 +753,79 @@ function buildLogic(target: string, field?: Field) {
   return `直接取 ${field.table}.${field.name}`;
 }
 
-async function callAiPrompt<T = unknown>(promptName: string, context: unknown): Promise<AiApiResponse<T>> {
-  const response = await fetch(`${API_BASE}/api/ai/${promptName}`, {
+async function callAiPrompt<T = unknown>(promptName: string, context: unknown, options: { onJobStarted?: (jobId: string) => void; onHeartbeat?: (status: string) => void } = {}): Promise<AiApiResponse<T>> {
+  const startResponse = await fetch(`${API_BASE}/api/ai/jobs/${promptName}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(context)
   });
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(errorText || `AI request failed: ${response.status}`);
+  if (!startResponse.ok) {
+    const errorText = await startResponse.text();
+    throw new Error(errorText || `AI job start failed: ${startResponse.status}`);
   }
-  return response.json() as Promise<AiApiResponse<T>>;
+  const started = await startResponse.json() as AiJobStartResponse;
+  options.onJobStarted?.(started.jobId);
+  let pollDelayMs = 5000;
+
+  while (true) {
+    await sleep(pollDelayMs);
+    const statusResponse = await fetch(`${API_BASE}/api/ai/jobs/${started.jobId}`, { cache: "no-store" });
+    if (!statusResponse.ok) {
+      const errorText = await statusResponse.text();
+      throw new Error(errorText || `AI job status failed: ${statusResponse.status}`);
+    }
+    const job = await statusResponse.json() as AiJobStatusResponse<T>;
+    options.onHeartbeat?.(job.status);
+    if (job.status === "done" && job.result) return job.result;
+    if (job.status === "canceled") throw new Error("AI 任务已手动停止");
+    if (job.status === "error") throw new Error(job.error || "AI 任务执行失败");
+    pollDelayMs = Math.min(pollDelayMs + 1500, 10000);
+  }
+}
+
+async function cancelAiJob(jobId: string) {
+  await fetch(`${API_BASE}/api/ai/jobs/${jobId}`, { method: "DELETE" });
+}
+
+async function callFieldMappingWorkflow<T = unknown>(
+  context: unknown,
+  options: { onStarted?: (workflowId: string) => void; onProgress?: (message: string) => void } = {}
+): Promise<AiApiResponse<T>> {
+  const startResponse = await fetch(`${API_BASE}/api/workflows/field-mapping`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(context)
+  });
+  if (!startResponse.ok) {
+    const errorText = await startResponse.text();
+    throw new Error(errorText || `Workflow start failed: ${startResponse.status}`);
+  }
+  const started = await startResponse.json() as WorkflowStatusResponse<T>;
+  options.onStarted?.(started.workflowId);
+  let pollDelayMs = 10000;
+
+  while (true) {
+    await sleep(pollDelayMs);
+    const statusResponse = await fetch(`${API_BASE}/api/workflows/${started.workflowId}`, { cache: "no-store" });
+    if (!statusResponse.ok) {
+      const errorText = await statusResponse.text();
+      throw new Error(errorText || `Workflow status failed: ${statusResponse.status}`);
+    }
+    const workflow = await statusResponse.json() as WorkflowStatusResponse<T>;
+    options.onProgress?.(`${workflow.currentStep}（${workflow.progress.current}/${workflow.progress.total}）`);
+    if (workflow.status === "done" && workflow.result) return workflow.result;
+    if (workflow.status === "canceled") throw new Error("字段映射流程已手动停止");
+    if (workflow.status === "error") throw new Error(workflow.error || "字段映射流程执行失败");
+    pollDelayMs = Math.min(pollDelayMs + 5000, 20000);
+  }
+}
+
+async function cancelWorkflow(workflowId: string) {
+  await fetch(`${API_BASE}/api/workflows/${workflowId}`, { method: "DELETE" });
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function buildAiContext(tables: SourceTable[], targets: TargetField[], aiConfig: AiConfig, extra: Record<string, unknown> = {}) {
@@ -789,7 +926,13 @@ function mapAiQuestions(result: unknown): Question[] {
       owner: pickString(row, ["owner", "assignee"], "数据产品/业务方"),
       status: pickString(row, ["status"], "待确认")
     };
-  }).filter((question): question is Question => Boolean(question));
+  }).filter((question): question is Question => Boolean(question)).filter(isRelevantQuestion);
+}
+
+function isRelevantQuestion(question: Question) {
+  const text = `${question.type} ${question.desc} ${question.suggestion}`;
+  if (/测试表|是否真实承载|是否属于生产|mock|占位表|链路验证|训练|方法论/i.test(text)) return false;
+  return /粒度|口径|字段|来源|字典|枚举|主键|时间|状态|组织|负责人|维度|指标|事实|模型|SQL|DDL|INSERT|SELECT|聚合|去重|关联|主数据|当前|历史|宽表|明细|快照|是否纳入|缺表|补表/.test(text);
 }
 
 function getErrorMessage(error: unknown) {
@@ -820,6 +963,7 @@ function App() {
   const [aiMappings, setAiMappings] = useState<Mapping[] | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus>({ mode: "idle", message: "" });
   const [aiCalls, setAiCalls] = useState<AiCallLog[]>([]);
+  const [generatedDdl, setGeneratedDdl] = useState("");
   const [generatedSql, setGeneratedSql] = useState("");
   const [generatedPrd, setGeneratedPrd] = useState("");
   const [aiConfig, setAiConfig] = useState<AiConfig>(() => loadAiConfig());
@@ -827,6 +971,8 @@ function App() {
   const [selectedOdsTables, setSelectedOdsTables] = useState<string[]>([]);
   const [isAiSettingsOpen, setIsAiSettingsOpen] = useState(false);
   const [reanalysisStep, setReanalysisStep] = useState(-1);
+  const activeAiJobs = useRef<Set<string>>(new Set());
+  const activeWorkflows = useRef<Set<string>>(new Set());
 
   const targets = useMemo(() => parseTargets(targetRaw), [targetRaw]);
   const baseMappings = useMemo(() => recommendMappings(targets, tables), [targets, tables]);
@@ -837,6 +983,9 @@ function App() {
   const isCoCreation = mode === "共创调研";
   const visibleStages = isCoCreation ? coCreationStages : stages;
   const coCreationContext = { researchGoal, researchNotes, stakeholders };
+  const currentTaskKey = stageToTaskKey(activeStage);
+  const currentTaskModel = getTaskModel(aiConfig, currentTaskKey);
+  const currentProviderName = currentTaskModel.provider?.name || "未配置模型";
 
   useEffect(() => {
     localStorage.setItem("modelcreater.aiConfig", JSON.stringify(aiConfig));
@@ -863,7 +1012,22 @@ function App() {
     };
     setAiCalls((current) => [nextCall, ...current].slice(0, 12));
     try {
-      const result = await callAiPrompt<T>(promptName, context);
+      const result = await callAiPrompt<T>(promptName, context, {
+        onJobStarted: (jobId) => {
+          activeAiJobs.current.add(jobId);
+          setAiCalls((current) => current.map((item) => item.id === id ? { ...item, jobId } : item));
+        },
+        onHeartbeat: (status) => {
+          if (status === "running") {
+            setAiCalls((current) => current.map((item) => item.id === id ? { ...item } : item));
+          }
+        }
+      });
+      setAiCalls((current) => {
+        const finished = current.find((item) => item.id === id);
+        if (finished?.jobId) activeAiJobs.current.delete(finished.jobId);
+        return current;
+      });
       setAiCalls((current) => current.map((item) => item.id === id ? {
         ...item,
         provider: result.provider,
@@ -874,6 +1038,11 @@ function App() {
       return result;
     } catch (error) {
       const message = getErrorMessage(error);
+      setAiCalls((current) => {
+        const failed = current.find((item) => item.id === id);
+        if (failed?.jobId) activeAiJobs.current.delete(failed.jobId);
+        return current;
+      });
       setAiCalls((current) => current.map((item) => item.id === id ? {
         ...item,
         status: "error",
@@ -884,32 +1053,48 @@ function App() {
     }
   };
 
+  const handleStopAiJobs = async () => {
+    const jobIds = Array.from(activeAiJobs.current);
+    const workflowIds = Array.from(activeWorkflows.current);
+    if (!jobIds.length && !workflowIds.length) return;
+    await Promise.allSettled([
+      ...jobIds.map((jobId) => cancelAiJob(jobId)),
+      ...workflowIds.map((workflowId) => cancelWorkflow(workflowId))
+    ]);
+    activeAiJobs.current.clear();
+    activeWorkflows.current.clear();
+    setAiCalls((current) => current.map((item) => item.status === "running" ? {
+      ...item,
+      status: "error",
+      durationMs: Date.now() - item.startedAt,
+      error: "用户手动停止"
+    } : item));
+    setIsAnalyzing(false);
+    setReanalysisStep(-1);
+    setAiStatus({ mode: "error", message: "已手动停止当前大模型任务，已完成的批次结果会保留在页面中。" });
+  };
+
   const handleAnalyze = async () => {
     const parsed = parseDdl(ddlText);
     const nextTables = parsed.length ? mergeTables(tables, parsed) : tables;
     if (parsed.length) setTables(nextTables);
     setAiMappings(null);
     setQuestions([]);
+    setGeneratedDdl("");
     setGeneratedSql("");
     setGeneratedPrd("");
     setIsAnalyzing(true);
     setActiveStage(2);
-    setAiStatus({ mode: "running", message: "正在调用千问进行表语义、字段语义和字段映射预分析..." });
+    setAiStatus({ mode: "running", message: "正在调用千问进行表级语义预分析和建模风险识别..." });
     try {
-      const [tableResult, fieldResult, mappingResult] = await Promise.all([
-        invokeAiPrompt(isCoCreation ? "AI 调研问题生成" : "AI 预分析", "table_semantic", buildAiContext(nextTables, targets, aiConfig, { taskName, domain, mode, modeProfile, coCreationContext })),
-        invokeAiPrompt(isCoCreation ? "AI 调研问题生成" : "AI 预分析", "field_semantic", buildAiContext(nextTables, targets, aiConfig, { taskName, domain, mode, modeProfile, coCreationContext })),
-        invokeAiPrompt(isCoCreation ? "AI 调研问题生成" : "AI 预分析", "field_mapping", buildAiContext(nextTables, targets, aiConfig, { taskName, domain, mode, modeProfile, coCreationContext, selectedModel: modelPlans.find((plan) => plan.selected) || null }))
-      ]);
-      const nextMappings = mapAiMappings(mappingResult.result, recommendMappings(targets, nextTables));
-      if (nextMappings.length) setAiMappings(nextMappings);
-      const nextQuestions = [
-        ...mapAiQuestions(tableResult.result),
-        ...mapAiQuestions(fieldResult.result),
-        ...mapAiQuestions(mappingResult.result)
-      ];
+      const tableResult = await invokeAiPrompt(
+        isCoCreation ? "AI 调研问题生成" : "AI 预分析",
+        "table_semantic",
+        buildAiContext(nextTables, targets, aiConfig, { taskName, domain, mode, modeProfile, coCreationContext })
+      );
+      const nextQuestions = mapAiQuestions(tableResult.result);
       if (nextQuestions.length) setQuestions((current) => mergeQuestions(nextQuestions, current));
-      setAiStatus({ mode: "done", message: `千问预分析完成：${tableResult.provider}/${tableResult.model}` });
+      setAiStatus({ mode: "done", message: `千问预分析完成：${tableResult.provider}/${tableResult.model}。下一步请先查看 CDM 推荐并选择目标模型，再生成字段映射。` });
     } catch (error) {
       logAiFailure("预分析", error);
       setAiStatus({ mode: "error", message: `大模型预分析失败，未生成任何替代结果。请查看浏览器控制台和后端日志：${getErrorMessage(error)}` });
@@ -995,26 +1180,81 @@ function App() {
   };
 
   const handleGoFieldMapping = async () => {
-    setAiStatus({ mode: "running", message: "正在调用千问生成字段映射..." });
+    const selectedModel = modelPlans.find((plan) => plan.selected);
+    if (!selectedModel) {
+      setAiStatus({ mode: "error", message: "请先在 CDM 模型推荐中单选一个目标模型，再生成字段映射。" });
+      return;
+    }
+    const batches = chunkArray(targets, 6);
+    const id = `field_mapping_workflow_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const startedAt = Date.now();
+    const { provider, model } = getTaskModel(aiConfig, "mapping");
+    const workflowCall: AiCallLog = {
+      id,
+      step: `字段映射后端批处理 0/${batches.length}`,
+      promptName: "field_mapping",
+      provider: provider?.name || "未配置供应商",
+      model,
+      taskKey: "mapping",
+      status: "running",
+      startedAt
+    };
+    setAiCalls((current) => [workflowCall, ...current].slice(0, 12));
+    setAiStatus({ mode: "running", message: `后端正在分批调用千问生成字段映射，共 ${batches.length} 批...` });
     try {
-      const result = await invokeAiPrompt("字段映射工作台", "field_mapping", buildAiContext(tables, targets, aiConfig, {
-        taskName,
-        domain,
-        mode,
-        modeProfile,
-        coCreationContext,
-        selectedModel: modelPlans.find((plan) => plan.selected) || null,
-        questions
-      }));
-      const nextMappings = mapAiMappings(result.result, baseMappings);
+      const result = await callFieldMappingWorkflow<{ mappings?: unknown[]; questions?: unknown[] }>(
+        buildAiContext(tables, targets, aiConfig, {
+          taskName,
+          domain,
+          mode,
+          modeProfile,
+          coCreationContext,
+          selectedModel,
+          questions
+        }),
+        {
+          onStarted: (workflowId) => {
+            activeWorkflows.current.add(workflowId);
+            setAiCalls((current) => current.map((item) => item.id === id ? { ...item, workflowId } : item));
+          },
+          onProgress: (message) => {
+            setAiStatus({ mode: "running", message });
+            setAiCalls((current) => current.map((item) => item.id === id ? { ...item, step: message } : item));
+          }
+        }
+      );
+      setAiCalls((current) => {
+        const finished = current.find((item) => item.id === id);
+        if (finished?.workflowId) activeWorkflows.current.delete(finished.workflowId);
+        return current;
+      });
+      const nextMappings = orderMappingsByTargets(mapAiMappings(result.result, baseMappings), targets);
       if (nextMappings.length) setAiMappings(nextMappings);
       const nextQuestions = mapAiQuestions(result.result);
       if (nextQuestions.length) setQuestions((current) => mergeQuestions(nextQuestions, current));
-      setAiStatus({ mode: "done", message: `千问字段映射完成：${result.provider}/${result.model}` });
+      setAiCalls((current) => current.map((item) => item.id === id ? {
+        ...item,
+        provider: result.provider,
+        model: result.model,
+        status: "done",
+        durationMs: Date.now() - startedAt
+      } : item));
+      setAiStatus({ mode: "done", message: `千问字段映射后端批处理完成：${result.provider}/${result.model}，共 ${batches.length} 批。` });
       setActiveStage(4);
     } catch (error) {
+      setAiCalls((current) => {
+        const failed = current.find((item) => item.id === id);
+        if (failed?.workflowId) activeWorkflows.current.delete(failed.workflowId);
+        return current;
+      });
+      setAiCalls((current) => current.map((item) => item.id === id ? {
+        ...item,
+        status: "error",
+        durationMs: Date.now() - startedAt,
+        error: getErrorMessage(error)
+      } : item));
       logAiFailure("字段映射", error);
-      setAiStatus({ mode: "error", message: `大模型字段映射失败，未生成任何替代映射。请查看浏览器控制台和后端日志：${getErrorMessage(error)}` });
+      setAiStatus({ mode: "error", message: `大模型字段映射分批失败，已保留已完成批次结果。请查看浏览器控制台和后端日志：${getErrorMessage(error)}` });
     }
   };
 
@@ -1026,12 +1266,30 @@ function App() {
     }
     setAiStatus({ mode: "running", message: "正在调用千问生成 SQL 草稿和 PRD..." });
     try {
-      const [sqlResult, prdResult] = await Promise.all([
-        invokeAiPrompt("交付物生成", "sql_generation", buildAiContext(tables, targets, aiConfig, { taskName, domain, mode, modeProfile, coCreationContext, selectedModel, mappings, questions })),
-        invokeAiPrompt("交付物生成", "prd_generation", buildAiContext(tables, targets, aiConfig, { taskName, domain, mode, modeProfile, coCreationContext, selectedModel, modelPlans, mappings, questions }))
-      ]);
-      const sql = (sqlResult.result as { sql?: string }).sql;
+      const sqlResult = await invokeAiPrompt("交付物生成", "sql_generation", buildAiContext(tables, targets, aiConfig, { taskName, domain, mode, modeProfile, coCreationContext, selectedModel, mappings, questions }));
+      const sqlPayload = sqlResult.result as { createTableSql?: string; insertSql?: string; sql?: string; finalSelectSql?: string; outputColumns?: unknown[] };
+      const ddl = sqlPayload.createTableSql;
+      const sql = sqlPayload.insertSql || sqlPayload.sql;
+      if (!ddl || !sql) {
+        throw new Error("大模型 SQL 结果缺少 createTableSql 或 insertSql，无法生成可信交付物。");
+      }
+      const prdResult = await invokeAiPrompt("交付物生成", "prd_generation", buildAiContext(tables, targets, aiConfig, {
+        taskName,
+        domain,
+        mode,
+        modeProfile,
+        coCreationContext,
+        selectedModel,
+        modelPlans,
+        mappings,
+        questions,
+        createTableSql: ddl,
+        insertSql: sql,
+        finalSelectSql: sqlPayload.finalSelectSql,
+        outputColumns: sqlPayload.outputColumns || []
+      }));
       const markdown = (prdResult.result as { markdown?: string }).markdown;
+      setGeneratedDdl(ddl);
       if (sql) setGeneratedSql(sql);
       if (markdown) setGeneratedPrd(markdown);
       setAiStatus({ mode: "done", message: `千问交付物生成完成：${sqlResult.provider}/${sqlResult.model}` });
@@ -1078,7 +1336,7 @@ function App() {
           <span>当前任务</span>
           <strong>{taskName}</strong>
           <small>{domain} · {mode} · {expectedLayer}</small>
-          <button className="settings-button" onClick={() => setIsAiSettingsOpen(true)}>{getTaskModel(aiConfig, "semantic").provider?.name} · AI 全局配置</button>
+          <button className="settings-button" onClick={() => setIsAiSettingsOpen(true)}>{currentProviderName} · AI 全局配置</button>
         </div>
       </section>
 
@@ -1114,7 +1372,7 @@ function App() {
       </section>
 
       <AiStatusBanner status={aiStatus} config={aiConfig} />
-      <AiCallDetails calls={aiCalls} />
+      <AiCallDetails calls={aiCalls} onStop={handleStopAiJobs} />
 
       {activeStage === 0 && (
         <Panel title="新建模型任务" subtitle="选择不同建模模式后，页面输入重点、AI 推理目标和下一步动作会随之变化。">
@@ -1227,8 +1485,8 @@ function App() {
       )}
 
       {activeStage === 6 && (
-        <Panel title="交付物预览" subtitle="原型中先生成可复制的 PRD/DDL/SQL 草稿摘要，后续可接真实导出。">
-          <Deliverables taskName={taskName} targets={targets} mappings={mappings} tables={tables} questions={questions} modelPlans={modelPlans} generatedSql={generatedSql} generatedPrd={generatedPrd} aiStatus={aiStatus} />
+        <Panel title="交付物预览" subtitle="交付物由大模型按最终查询 SQL 推导 DDL，并生成 INSERT INTO ... SELECT，不再按目标字段本地拼表。">
+          <Deliverables taskName={taskName} targets={targets} mappings={mappings} tables={tables} questions={questions} modelPlans={modelPlans} generatedDdl={generatedDdl} generatedSql={generatedSql} generatedPrd={generatedPrd} aiStatus={aiStatus} />
         </Panel>
       )}
     </main>
@@ -1404,7 +1662,7 @@ function AiStatusBanner({ status, config }: { status: AiStatus; config: AiConfig
   );
 }
 
-function AiCallDetails({ calls }: { calls: AiCallLog[] }) {
+function AiCallDetails({ calls, onStop }: { calls: AiCallLog[]; onStop: () => void }) {
   if (!calls.length) return null;
   const latest = calls[0];
   const runningCount = calls.filter((call) => call.status === "running").length;
@@ -1416,22 +1674,28 @@ function AiCallDetails({ calls }: { calls: AiCallLog[] }) {
           <b>大模型调用</b>
           <span>{runningCount ? `${runningCount} 个任务正在处理` : "最近一次调用已完成"}</span>
         </div>
-        <strong>{latest.provider} / {latest.model}</strong>
+        <div className="ai-call-actions">
+          <strong>{latest.provider} / {latest.model}</strong>
+          {runningCount > 0 && <button className="secondary-button" onClick={onStop}>停止当前任务</button>}
+        </div>
       </div>
       <article className={`ai-call-current ${latest.status}`}>
         <div>
           <b>{aiPromptLabels[latest.promptName] || latest.promptName}</b>
           <span>{latest.step} · {aiTaskLabels[latest.taskKey]} · {modelModeLabel(latest.model)}</span>
         </div>
-        <small>{latest.status === "running" ? "调用中..." : `耗时 ${((latest.durationMs || 0) / 1000).toFixed(1)}s`}</small>
+        <small>{latest.status === "running" ? `后端异步思考中，不受浏览器超时影响${latest.jobId ? ` · Job ${latest.jobId.slice(-6)}` : ""}` : `耗时 ${((latest.durationMs || 0) / 1000).toFixed(1)}s`}</small>
         {isReasoningModel(latest.model) && (
-          <ol className="reasoning-steps">
-            {phases.map((phase, index) => (
-              <li className={latest.status === "done" || index < 2 ? "done" : latest.status === "running" && index === 2 ? "active" : ""} key={phase}>
-                <span>{index + 1}</span>{phase}
-              </li>
-            ))}
-          </ol>
+          <>
+            <ol className="reasoning-steps">
+              {phases.map((phase, index) => (
+                <li className={latest.status === "done" || index < 2 ? "done" : latest.status === "running" && index === 2 ? "active" : ""} key={phase}>
+                  <span>{index + 1}</span>{phase}
+                </li>
+              ))}
+            </ol>
+            <p className="reasoning-note">展示的是可复核的推理阶段和依据摘要；原始隐藏思维链不直接展示，避免噪音和误导。</p>
+          </>
         )}
         {latest.error && <em>{latest.error}</em>}
       </article>
@@ -1839,17 +2103,17 @@ function ReanalysisProgress({ activeStep, config }: { activeStep: number; config
   );
 }
 
-function Deliverables({ taskName, targets, mappings, tables, questions, modelPlans, generatedSql, generatedPrd, aiStatus }: { taskName: string; targets: TargetField[]; mappings: Mapping[]; tables: SourceTable[]; questions: Question[]; modelPlans: ModelPlan[]; generatedSql: string; generatedPrd: string; aiStatus: AiStatus }) {
+function Deliverables({ taskName, targets, mappings, tables, questions, modelPlans, generatedDdl, generatedSql, generatedPrd, aiStatus }: { taskName: string; targets: TargetField[]; mappings: Mapping[]; tables: SourceTable[]; questions: Question[]; modelPlans: ModelPlan[]; generatedDdl: string; generatedSql: string; generatedPrd: string; aiStatus: AiStatus }) {
   const deliveryModel = modelPlans.find((plan) => plan.selected) || modelPlans[0];
   const candidateModels = modelPlans;
-  if (!deliveryModel || !generatedSql || !generatedPrd) {
+  if (!deliveryModel || !generatedDdl || !generatedSql || !generatedPrd) {
     return (
       <div className="deliverables">
-        <AiErrorCard message="交付物必须由大模型成功生成后才允许预览和下载。当前没有可用的大模型 SQL/PRD 结果。" />
+        <AiErrorCard message="交付物必须由大模型成功生成 DDL、INSERT SQL 和 PRD 后才允许预览和下载。当前没有可用的大模型交付结果。" />
       </div>
     );
   }
-  const ddl = buildDdl(deliveryModel, targets);
+  const ddl = generatedDdl;
   const sql = generatedSql;
   const prd = generatedPrd;
   const enumRows = buildEnumRows(tables, mappings);
@@ -1876,10 +2140,6 @@ function Deliverables({ taskName, targets, mappings, tables, questions, modelPla
       <p>交付摘要：{tables.length} 张来源表、{targets.length} 个目标字段、{questions.length} 个疑问项，字段映射已生成 {mappings.length} 条。</p>
     </div>
   );
-}
-
-function buildDdl(deliveryModel: ModelPlan, targets: TargetField[]) {
-  return `CREATE TABLE ${deliveryModel.tableName} (\n${targets.map((field) => `  ${field.en} varchar(255) COMMENT '${field.cn}'`).join(",\n")}\n) COMMENT='${deliveryModel.cnName}';`;
 }
 
 function buildEnumRows(tables: SourceTable[], mappings: Mapping[]) {

@@ -36,6 +36,8 @@ After users answer questions in the question center, re-evaluate mappings, feasi
 5. If an answer provides source table/field, re-map the target field.
 6. If the answer is still insufficient, keep or create questions.
 7. Preserve traceability and explain what changed.
+8. Re-check whether each updated mapping can be expressed in final SQL. If not, keep a blocking question.
+9. Do not mark a question as resolved if the answer still does not provide enough information to generate `CREATE TABLE` and `INSERT INTO ... SELECT ...`.
 
 ## OneData Review Checks
 
@@ -47,6 +49,7 @@ After applying user answers, re-check:
 4. Whether current/historical dimension policy is confirmed.
 5. Whether additive/semi-additive/non-additive metric rules are correct.
 6. Whether unresolved questions block delivery.
+7. Whether final output columns, data types, and insert expressions can be derived from the confirmed mappings.
 
 ## Required Output JSON
 
@@ -58,6 +61,9 @@ After applying user answers, re-check:
       "sourceTable": "ods_business_event_record",
       "sourceField": "event_time",
       "logic": "取 event_type=完成 且 event_result=有效 的最早 event_time",
+      "outputColumnName": "finish_time",
+      "outputDataType": "datetime",
+      "selectExpression": "min(case when event_type='完成' and event_result='有效' then event_time end)",
       "feasibility": "可加工生成",
       "confidence": "高",
       "status": "AI复核通过",

@@ -6,6 +6,17 @@ Use with `aliyun_onedata_methodology.md` and `_shared_system.md`.
 
 Classify each source field and target field into semantic categories, detect ambiguity, identify dictionaries, current/historical attributes, metric fields, and grain signals.
 
+## Scale Control
+
+For large inputs, do not output one verbose object for every source field. Keep the response compact and valid JSON:
+
+1. `sourceFieldSemantics` may include only key fields that affect modeling decisions, joins, dictionaries, time logic, status flow, grain, or SQL generation.
+2. Prefer a concise `fieldCoverageSummary` grouped by table for ordinary descriptive/audit fields.
+3. Keep `evidence`, `ambiguities`, and `questions` short. Do not write long explanations.
+4. The total response should stay under 12,000 Chinese characters.
+5. If complete field-level output would exceed the limit, output `truncatedByDesign: true` and prioritize P0/P1 target fields, primary keys, foreign keys, status fields, time fields, organization/person fields, and metric fields.
+6. Always return a complete JSON object. Never stop in the middle of an array.
+
 ## Semantic Categories
 
 Use one or more:
@@ -101,6 +112,15 @@ For every field, judge:
       "suggestion": "疑似同义字段，请确认是否合并"
     }
   ],
+  "fieldCoverageSummary": [
+    {
+      "tableName": "ods_xxx",
+      "coveredKeyFieldCount": 12,
+      "ordinaryFieldCount": 30,
+      "notes": "普通描述字段已省略，仅保留会影响建模和 SQL 的字段"
+    }
+  ],
+  "truncatedByDesign": false,
   "summary": "字段语义分析摘要"
 }
 ```

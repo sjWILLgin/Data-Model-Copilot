@@ -6,6 +6,8 @@ Use with `aliyun_onedata_methodology.md` and `_shared_system.md`.
 
 Generate a complete model design PRD or delivery document based on selected model, mappings, source tables, questions, SQL draft, and dictionary dependencies.
 
+The PRD must reflect the final engineering delivery: `CREATE TABLE` and `INSERT INTO ... SELECT ...`. Do not describe a table definition that differs from the SQL draft output columns.
+
 ## Input JSON
 
 ```json
@@ -19,6 +21,9 @@ Generate a complete model design PRD or delivery document based on selected mode
   "mappings": [],
   "questions": [],
   "sqlDraft": "",
+  "createTableSql": "",
+  "insertSql": "",
+  "outputColumns": [],
   "enumDictionaries": []
 }
 ```
@@ -35,6 +40,8 @@ Generate a complete model design PRD or delivery document based on selected mode
 8. Provide grain risks and current/historical attribute decisions.
 9. Provide SQL draft summary.
 10. Provide delivery checklist for developers and business users.
+11. Verify that PRD field list, DDL columns, and INSERT SELECT output columns are consistent.
+12. If there is inconsistency, mark it as a blocking delivery risk.
 
 ## Alibaba Cloud / OneData PRD Sections
 
@@ -63,6 +70,10 @@ The PRD must include these methodology sections:
     },
     {
       "sheetName": "字段映射关系",
+      "rows": []
+    },
+    {
+      "sheetName": "DDL与INSERT一致性检查",
       "rows": []
     }
   ],

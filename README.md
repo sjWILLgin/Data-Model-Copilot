@@ -6,7 +6,7 @@ ModelFlow / Data Model Copilot
 
 Copyright (c) 2026 will（水金）. All rights reserved.
 
-未经书面授权，不得复制、分发、商用或二次开发。
+未经授权，不得商用。
 
 ## 本地启动
 
